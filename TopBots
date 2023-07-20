@@ -1,0 +1,21 @@
+# Sample data (replace this with your own DataFrame)
+top = 20
+
+# Get value counts for the column
+value_counts = bot_df[bot_df['Bot'] == 1 ]['ACCOUNT_ID'].value_counts()[0:20]
+
+# Create the horizontal bar chart
+plt.barh(value_counts.index, value_counts.values, color='lightblue', edgecolor='black')
+plt.xlabel('Количество ботовских кривых')
+plt.ylabel('ACCOUNT_ID')
+plt.title(f'Топ {top} наиболее активных ботов')
+plt.xticks(value_counts.values)
+
+# Display the count on each bar
+for index, value in enumerate(value_counts.values):
+    plt.text(value + 0.5, index, str(value), va='center')
+
+# Remove x-axis ticks and labels
+plt.xticks([])
+
+plt.show()
