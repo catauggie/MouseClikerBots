@@ -1,0 +1,86 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Read the Excel file
+df = pd.read_excel('Координаты движения мыши.xlsx')#.loc[0:10000]
+
+def remove_last_number_and_semicolon(line):
+    num_digits = count_digits_before_last_semicolon(line)
+    if line.endswith(","):
+        line = line[:-1]  # Remove the last semicolon
+    last_comma_index = line.rfind(",")  # Find the last comma index
+    if last_comma_index != -1 and line[last_comma_index:].count(";") == 1:
+        line = line[:last_comma_index+num_digits+1]  # Remove the last number and last semicolon
+
+    # Remove comma if it is the last symbol in the line
+    if line.endswith(","):
+        line = line[:-1]
+
+    return line
+
+def count_digits_before_last_semicolon(line):
+    last_semicolon_index = line.rfind(";")
+    if last_semicolon_index == -1:
+        return 0  # If there is no semicolon in the line, return 0
+
+    before_semicolon = line[:last_semicolon_index]
+    last_comma_index = before_semicolon.rfind(",")
+    if last_comma_index == -1:
+        return 0  # If there is no comma before the last semicolon, return 0
+
+    number_before_semicolon = before_semicolon[last_comma_index+1:]
+    num_digits = sum(1 for char in number_before_semicolon if char.isdigit())
+    return num_digits
+
+
+# Set the threshold for straight line detection
+straight_line_threshold = 100  # Adjust this value as needed
+
+# Create empty lists to store the indexes
+bot_indexes = []
+human_indexes = []
+
+# Iterate over each cell in the column
+for index, cell_value in enumerate(df['Массив координат']):
+    if pd.isnull(cell_value) or cell_value == "":
+        continue  # Skip iteration if the cell value is NaN or empty
+    
+    cell_value = remove_last_number_and_semicolon(cell_value)
+    coord_list = cell_value.split(';')
+    
+    # Check if any empty string is present in coord_list
+    if any(not coord for coord in coord_list):
+        continue  # Skip iteration if an empty string is found
+    
+    # Extract x and y coordinates from each pair
+    x_coords = [int(coord.split(',')[0]) for coord in coord_list]
+    y_coords = [int(coord.split(',')[1]) for coord in coord_list]
+
+    # Calculate movement patterns
+    straight_line_detected = False
+    for i in range(2, len(coord_list)):
+        x1, y1 = map(int, coord_list[i-2].split(','))
+        x2, y2 = map(int, coord_list[i].split(','))
+
+        # Check if the segment forms a straight line
+        if abs((y2 - y1) * (x_coords[i-1] - x1) - (x2 - x1) * (y_coords[i-1] - y1)) < straight_line_threshold:
+            straight_line_detected = True
+            break
+
+    # Classify trajectory based on straight line detection
+    if straight_line_detected:
+        trajectory_class = 'Human'
+        human_indexes.append(index)
+    else:
+        trajectory_class = 'Bot'
+        bot_indexes.append(index)
+        plt.plot(x_coords, y_coords, label=f"User {df['ACCOUNT_ID'][index]} - {trajectory_class}")
+
+        # Add legend and labels
+        plt.legend()
+        plt.xlabel('X Coordinate')
+        plt.ylabel('Y Coordinate')
+        plt.title(f'Bot Trajectory {index+1}')
+        plt.savefig(f'D:/Мои файлы 2019/0 всякое/Координаты движения мыши/боты/trajectory_{index+1}.png')
+        # Show the plot
+        plt.show()
