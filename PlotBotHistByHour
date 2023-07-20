@@ -1,0 +1,58 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def plot_and_save_counts_by_hour(df, filename):
+    # Convert 'Дата записи' column to datetime type
+    df['Дата записи'] = pd.to_datetime(df['Дата записи'])
+
+    # Group data by hour and count occurrences of 'Bot' == 1 and 'Bot' == 0
+    hourly_counts_bot = df[df['Bot'] == 1].groupby(df['Дата записи'].dt.hour).size()
+    hourly_counts_human = df[df['Bot'] == 0].groupby(df['Дата записи'].dt.hour).size()
+
+    # Create the plot
+    plt.figure(figsize=(10, 6))
+
+    # Set the width of each bar
+    width = 0.4
+
+    # Plot the bar chart for 'Bot' == 1 (red)
+    bars_bot = plt.bar(hourly_counts_bot.index - width/2, hourly_counts_bot.values, width=width, color='red', label='Bot')
+
+    # Plot the bar chart for 'Bot' == 0 (green)
+    bars_human = plt.bar(hourly_counts_human.index + width/2, hourly_counts_human.values, width=width, color='green', label='Human')
+
+    # Set x-axis ticks to be 24-hour format
+    plt.xticks(range(24))
+
+    # Set x and y axis labels
+    plt.xlabel('Hour')
+    plt.ylabel('Bot and Human Counts')
+    plt.title(f"Bot and Human Counts by Hour (user {list(df['ACCOUNT_ID'])[0]})")
+    plt.legend()
+
+    # Add contrast-colored number of counts on top of each bar
+    def add_counts_on_bars(bars):
+        for bar in bars:
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width() / 2., height,
+                     f'{int(height)}', ha='center', va='bottom',
+                     color='darkblue')
+
+    add_counts_on_bars(bars_bot)
+    add_counts_on_bars(bars_human)
+
+    plt.grid(True)
+
+    # Save the picture
+    plt.savefig(filename)
+
+    # Display the picture
+    plt.show()
+
+bot_data = []
+for b in range(len(bot_list)):
+    bb = bot_df[bot_df['ACCOUNT_ID'] == bot_list[b]]
+    bot_data.append(bb)
+
+for a in range(len(bot_data)):
+    plot_and_save_counts_by_hour(bot_data[a], list(bot_data[a]['ACCOUNT_ID'])[0])
