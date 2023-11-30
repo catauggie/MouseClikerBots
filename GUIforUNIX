@@ -1,0 +1,548 @@
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QFileDialog, QLabel, QProgressBar, QTableWidget, QTableWidgetItem, QProgressDialog
+from PyQt5.QtCore import Qt
+from pandas import read_excel
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+import os
+import sys
+
+class PlotCanvas(FigureCanvas):
+    def __init__(self, parent=None, width=5, height=4, dpi=100):
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        self.axes = fig.add_subplot(111)
+        super(PlotCanvas, self).__init__(fig)
+
+class CoordinateAnalyzerApp(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.df = None
+        self.output_df = None
+        self.selected_rows = []
+        self.image_folder = 'images'
+        self.image_saving_progress_dialog = None
+
+        self.init_ui()
+
+    def init_ui(self):
+        # Create widgets
+        self.load_button = QPushButton('Load Excel File', self)
+        self.analyze_button = QPushButton('Analyze Coordinates', self)
+        self.save_button = QPushButton('Save Bot DataFrame', self)
+        self.plot_button = QPushButton('Plot Selected Rows', self)
+        self.save_plot_button = QPushButton('Save Plot', self)
+        self.info_label = QLabel(self)
+        self.progress_bar = QProgressBar(self)
+        self.result_table = QTableWidget(self)
+        self.plot_canvas = PlotCanvas(self)
+
+        # New buttons for statistical DataFrame
+        self.create_statistical_df_button = QPushButton('Create Statistical DataFrame', self)
+        self.save_statistical_df_button = QPushButton('Save Statistical DataFrame', self)
+        self.save_plot_button.clicked.connect(self.save_plot)
+
+        # Set up layout
+        layout = QVBoxLayout()
+        layout.addWidget(self.load_button)
+        layout.addWidget(self.analyze_button)
+        layout.addWidget(self.save_button)
+        layout.addWidget(self.info_label)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.result_table)
+        layout.addWidget(self.plot_button)
+        layout.addWidget(self.plot_canvas)
+        layout.addWidget(self.save_plot_button)
+        
+
+        # Add the new statistical DataFrame buttons to the layout
+        layout.addWidget(self.create_statistical_df_button)
+        layout.addWidget(self.save_statistical_df_button)
+
+        self.setLayout(layout)
+
+        # Connect buttons to functions
+        self.load_button.clicked.connect(self.load_excel)
+        self.analyze_button.clicked.connect(self.analyze_coordinates)
+        self.save_button.clicked.connect(self.save_bot_dataframe)
+        self.plot_button.clicked.connect(self.plot_selected_rows)
+
+        # Connect new statistical DataFrame buttons to functions
+        self.create_statistical_df_button.clicked.connect(self.create_statistical_df)
+        self.save_statistical_df_button.clicked.connect(self.save_statistical_df)
+
+        # Set up the main window
+        self.setGeometry(300, 300, 800, 600)
+        self.setWindowTitle('Coordinate Analyzer')
+        self.show()
+
+
+    def remove_last_number_and_semicolon(self, line):
+        if isinstance(line, str):
+            num_digits = self.count_digits_before_last_semicolon(line)
+            if line.endswith(","):
+                line = line[:-1]  # Remove the last semicolon
+            last_comma_index = line.rfind(",")  # Find the last comma index
+            if last_comma_index != -1 and line[last_comma_index:].count(";") == 1:
+                line = line[:last_comma_index + num_digits + 1]  # Remove the last number and last semicolon
+
+            # Remove comma if it is the last symbol in the line
+            if line.endswith(","):
+                line = line[:-1]
+
+        return line
+
+    def count_digits_before_last_semicolon(self, line):
+        if isinstance(line, str):
+            last_semicolon_index = line.rfind(";")
+            if last_semicolon_index == -1:
+                return 0  # If there is no semicolon in the line, return 0
+
+            before_semicolon = line[:last_semicolon_index]
+            last_comma_index = before_semicolon.rfind(",")
+            if last_comma_index == -1:
+                return 0  # If there is no comma before the last semicolon, return 0
+
+            number_before_semicolon = before_semicolon[last_comma_index + 1:]
+            num_digits = sum(1 for char in number_before_semicolon if char.isdigit())
+            return num_digits
+
+        return 0  # If the input is not a string, return 0
+
+    def calculate_speeds(self, unix_timestamps, x_coords, y_coords):
+        speeds = []
+        for i in range(1, len(unix_timestamps)):
+            time_diff = (unix_timestamps[i] - unix_timestamps[i - 1]) / 1000.0  # Convert to seconds
+            distance = np.sqrt((x_coords[i] - x_coords[i - 1]) ** 2 + (y_coords[i] - y_coords[i - 1]) ** 2)
+            speed = distance / time_diff
+            speeds.append(speed)
+        return speeds
+
+    def calculate_accelerations(self, unix_timestamps, speeds):
+        accelerations = []
+        for i in range(1, len(unix_timestamps) - 1):
+            time_diff = (unix_timestamps[i + 1] - unix_timestamps[i - 1]) / 1000.0  # Convert to seconds
+            acceleration = (speeds[i] - speeds[i - 1]) / time_diff
+            accelerations.append(acceleration)
+        return accelerations
+
+    def process_unix_column(self, input_df, col_name):
+        total_cells = len(input_df)
+        self.progress_bar.setMaximum(total_cells)
+        self.progress_bar.setValue(0)
+
+        processed_df = input_df.copy()  # Create a new DataFrame to store processed values
+        processed_df['Avg_Speed_unix'] = np.nan
+        processed_df['Avg_Accelerate_unix'] = np.nan
+
+        for index, cell_value in enumerate(processed_df[col_name]):
+            if pd.isnull(cell_value) or not isinstance(cell_value, str):
+                continue  # Skip iteration if the cell value is NaN or not a string
+
+            print(f"Processing cell {index} in column {col_name}")
+
+            try:
+                cell_value = self.remove_last_number_and_semicolon(cell_value)
+                coord_list = cell_value.split(';')
+
+                # Check if any empty string is present in coord_list
+                if any(not coord for coord in coord_list):
+                    continue  # Skip iteration if an empty string is found
+
+                # Extract x and y coordinates and unix timestamps from each pair
+                x_coords = [int(coord.split(',')[0]) for coord in coord_list]
+                y_coords = [int(coord.split(',')[1]) for coord in coord_list]
+
+                # Check if there are at least three elements in coord_list
+                if len(coord_list[0].split(',')) < 3:
+                    print(f"Skipping cell {index} in column {col_name}: Insufficient elements in coord_list")
+                    continue
+
+                unix_timestamps = [int(coord.split(',')[2]) for coord in coord_list]
+
+                # Calculate speeds and accelerations
+                speeds = self.calculate_speeds(unix_timestamps, x_coords, y_coords)
+                accelerations = self.calculate_accelerations(unix_timestamps, speeds)
+
+                # Store calculated values in the new DataFrame
+                processed_df.at[index, 'Avg_Speed_unix'] = np.nanmean(speeds)
+                processed_df.at[index, 'Avg_Accelerate_unix'] = np.nanmean(accelerations)
+
+            except Exception as e:
+                print(f"Error processing cell {index} in column {col_name}: {e}")
+                continue
+
+            # Update the progress bar
+            self.progress_bar.setValue(index + 1)
+            QApplication.processEvents()  # Ensure the GUI updates
+
+        return processed_df
+
+    def calculate_session_time(self, input_df, unix_columns):
+        processed_df = input_df.copy()  # Create a new DataFrame to store processed values
+        processed_df['Session time'] = np.nan
+
+        for index, row in processed_df.iterrows():
+            unix_values = [row[col] for col in unix_columns if col in processed_df.columns and not pd.isnull(row[col]) and isinstance(row[col], str)]
+
+            if not unix_values or not unix_values[0]:
+                continue
+
+            try:
+                # Extract unix timestamps
+                unix_timestamps = [int(coord.split(',')[2]) for coord in unix_values[0].split(';')]
+
+                # Check if there are at least two elements in unix_timestamps
+                if len(unix_timestamps) < 2:
+                    print(f"Skipping row {index}: Insufficient elements in unix_timestamps")
+                    continue
+
+                # Calculate session time
+                session_time = (max(unix_timestamps) - min(unix_timestamps)) / 1000.0  # Convert to seconds
+                processed_df.at[index, 'Session time'] = session_time
+
+            except (ValueError, IndexError) as e:
+                print(f"Error processing row {index}: {e}")
+                continue
+
+        return processed_df
+
+
+    def classify_trajectory(self, df, straight_line_threshold=100):
+        # Create empty lists to store the indexes
+        bot_indexes = []
+        human_indexes = []
+
+        # Iterate over each column in the DataFrame
+        for col_name in df.columns:
+            if 'unix' in col_name:
+                # Iterate over each cell in the column
+                for index, cell_value in enumerate(df[col_name]):
+                    if pd.isnull(cell_value) or not isinstance(cell_value, str):
+                        continue  # Skip iteration if the cell value is NaN or not a string
+
+                    cell_value = self.remove_last_number_and_semicolon(cell_value)
+
+                    try:
+                        coord_list = cell_value.split(';')
+                    except AttributeError:
+                        continue  # Skip iteration if the value is not a string
+
+                    # Check if any empty string is present in coord_list
+                    if any(not coord for coord in coord_list):
+                        continue  # Skip iteration if an empty string is found
+
+
+                    # Extract x and y coordinates from each pair
+                    x_coords = [int(coord.split(',')[0]) for coord in coord_list]
+                    y_coords = [int(coord.split(',')[1]) for coord in coord_list]
+
+                    # Calculate movement patterns
+                    straight_line_detected = False
+                    for i in range(2, len(coord_list)):
+                        x1, y1 = map(int, coord_list[i - 2].split(',')[:2])  # Use only the first two values
+                        x2, y2 = map(int, coord_list[i].split(',')[:2])       # Use only the first two values
+
+                        # Check if the segment forms a straight line
+                        if abs((y2 - y1) * (x_coords[i - 1] - x1) - (x2 - x1) * (y_coords[i - 1] - y1)) < straight_line_threshold:
+                            straight_line_detected = True
+                            break
+
+                    # Classify trajectory based on straight line detection
+                    if straight_line_detected:
+                        trajectory_class = 'Human'
+                        human_indexes.append(index)
+                    else:
+                        trajectory_class = 'Bot'
+                        bot_indexes.append(index)
+
+        # Determine the maximum index
+        max_index = max(max(bot_indexes), max(human_indexes))
+        concatenated_list = [1 if i in bot_indexes else 0 if i in human_indexes else np.nan for i in range(max_index + 1)]
+
+        return concatenated_list
+
+    def process_coordinate_df(self, input_df, straight_line_threshold=100):
+        
+        coordinate_columns = [column for column in input_df.columns if ('координат' in column.lower()) and not 'Кол-во' in column]
+        if not coordinate_columns:
+            print("No suitable 'unix' column found.")
+            return input_df
+
+        # Classify trajectories
+        input_df['Bot'] = self.classify_trajectory(input_df)
+
+        # Calculate session time for all 'unix' columns
+        input_df = self.calculate_session_time(input_df, coordinate_columns)
+        input_df = self.process_unix_column(input_df, coordinate_columns[0])
+        
+        # Save results
+        self.output_df = input_df[input_df['Bot'] == 1]
+        self.output_df = self.output_df.loc[:, ~self.output_df.columns.str.contains('Unnamed')]
+
+        return self.output_df
+
+
+    def load_excel(self):
+        options = QFileDialog.Options()
+        file_name, _ = QFileDialog.getOpenFileName(self, "Open Excel File", "", "Excel Files (*.xlsx);;All Files (*)", options=options)
+
+        if file_name:
+            self.df = read_excel(file_name)
+            self.info_label.setText(f'Loaded Excel file: {file_name}')
+            self.result_table.setRowCount(0)  # Clear existing table when loading a new file
+
+    def analyze_coordinates(self):
+        if self.df is not None:
+            self.load_button.setEnabled(False)
+            self.analyze_button.setEnabled(False)
+            self.save_button.setEnabled(False)
+            self.plot_button.setEnabled(False)
+
+            self.progress_bar.reset()
+            self.result_table.clear()
+
+            # Process coordinates
+            self.df = self.process_coordinate_df(self.df)
+
+            # Display resulting table with checkboxes
+            self.result_table.setColumnCount(len(self.df.columns))
+            self.result_table.setHorizontalHeaderLabels(self.df.columns)
+            self.result_table.setRowCount(len(self.df))
+            for i, row in enumerate(self.df.itertuples(index=False)):
+                for j, value in enumerate(row):
+                    item = QTableWidgetItem(str(value))
+                    if j == 0:  # Assuming 'Массив координат' is the first column
+                        item.setFlags(item.flags() | 0x00001000)  # Add ItemIsUserCheckable flag
+                        item.setCheckState(0)  # Initially unchecked
+                    self.result_table.setItem(i, j, item)
+
+            self.info_label.setText('Coordinates Analyzed. Select rows to plot.')
+            self.plot_button.setEnabled(True)
+
+            # Set output_df to the processed DataFrame
+            self.output_df = self.df
+
+            # Enable the Save button
+            self.save_button.setEnabled(True)
+        else:
+            self.info_label.setText('Please load an Excel file first.')
+
+
+    def save_bot_dataframe(self, traight_line_threshold = 100):
+        #straight_line_threshold = 100
+        if self.output_df is not None:
+            # Save DataFrame to Excel
+            file_name, _ = QFileDialog.getSaveFileName(self, "Save Bot DataFrame", "", "Excel Files (*.xlsx);;All Files (*)")
+
+            if file_name:
+                self.output_df.to_excel(file_name, index=False)
+                self.info_label.setText(f'Bot DataFrame saved to: {file_name}')
+
+                # Save plots to 'images' folder
+                if not os.path.exists(self.image_folder):
+                    os.makedirs(self.image_folder)
+
+                # Initialize progress bar for image saving
+                total_rows = len(self.df)
+                self.image_saving_progress_dialog = QProgressDialog("Saving Images...", "Cancel", 0, total_rows, self)
+                self.image_saving_progress_dialog.setWindowTitle('Image Saving Progress')
+                self.image_saving_progress_dialog.setWindowModality(Qt.WindowModal)
+
+                # Find the column containing 'координат' and not containing 'К-во'
+                coordinate_column = None
+                for column in self.df.columns:
+                    if 'координат' in column.lower() and not 'К-во' in column:
+                        coordinate_column = column
+                        break
+
+                if coordinate_column is None:
+                    self.info_label.setText("No suitable coordinate column found.")
+                    return
+
+                for row_index in range(total_rows):
+                    if self.image_saving_progress_dialog.wasCanceled():
+                        break
+
+                    cell_value = self.df[coordinate_column].iloc[row_index]
+                    if pd.isnull(cell_value) or cell_value == "":
+                        continue  # Skip iteration if the cell value is NaN or empty
+
+                    cell_value = self.df[coordinate_column].iloc[row_index]
+
+                    # Check if cell_value is a numpy.int64
+                    if isinstance(cell_value, np.int64):
+                        # Convert to string before splitting
+                        cell_value = str(cell_value)
+
+                    if pd.isnull(cell_value) or cell_value == "":
+                        continue  # Skip iteration if the cell value is NaN or empty
+
+                    try:
+                        coord_list = cell_value.split(';')  
+                        # Extract the first two values from each coordinate and convert them to integers
+                        x_coords = [int(coord.split(',')[0]) for coord in coord_list]
+                        y_coords = [int(coord.split(',')[1]) for coord in coord_list]
+
+                    except (ValueError, IndexError):
+                        continue
+
+                    # Check if any empty string is present in coord_list
+                    if any(not coord for coord in coord_list):
+                        continue  # Skip iteration if an empty string is found
+
+
+                    # Calculate movement patterns
+                    straight_line_detected = False
+                    for i in range(2, len(coord_list)):
+                        x1, y1 = map(int, coord_list[i - 2].split(','))
+                        x2, y2 = map(int, coord_list[i].split(','))
+
+                        # Check if the segment forms a straight line
+                        if abs((y2 - y1) * (x_coords[i - 1] - x1) - (x2 - x1) * (y_coords[i - 1] - y1)) < straight_line_threshold:
+                            straight_line_detected = True
+                            break
+
+                    # Plot and save as JPG
+                    if straight_line_detected:
+                        plt.plot(x_coords, y_coords, label=f"User {self.df['ACCOUNT_ID'].iloc[row_index]} - Human")
+                    else:
+                        plt.plot(x_coords, y_coords, label=f"User {self.df['ACCOUNT_ID'].iloc[row_index]} - Bot")
+
+                    # Add legend and labels
+                    plt.legend()
+                    plt.xlabel('X Coordinate')
+                    plt.ylabel('Y Coordinate')
+                    plt.title(f'Trajectory {row_index + 1}')
+                    plt.savefig(os.path.join(self.image_folder, f'trajectory_{row_index + 1}.jpg'))
+                    plt.clf()  # Clear the figure for the next plot
+
+                    # Update the progress bar
+                    self.image_saving_progress_dialog.setValue(row_index + 1)
+
+                # Close the progress bar
+                self.image_saving_progress_dialog.setValue(total_rows)
+                self.image_saving_progress_dialog.close()
+
+                self.info_label.setText(f'Plots saved to: {os.path.abspath(self.image_folder)}')
+        else:
+            self.info_label.setText('Please analyze coordinates first.')
+
+
+    def plot_selected_rows(self):
+        self.selected_rows = [i for i in range(self.result_table.rowCount()) if self.result_table.item(i, 0).checkState() == 2]
+
+        coordinate_column = None
+        for column in self.df.columns:
+            if ('координат' in column.lower() or 'unix' in column.lower()) and not 'К-во' in column:
+                if self.df[column].astype(str).str.contains(';').any():
+                    coordinate_column = column
+                    print(coordinate_column)
+                    break
+
+        if coordinate_column is None:
+            self.info_label.setText("No suitable coordinate column found.")
+            return
+
+        if not self.selected_rows:
+            self.info_label.setText('No rows selected for plotting.')
+        else:
+            self.plot_button.setEnabled(False)
+
+            plotted_labels = set()  # Keep track of plotted labels
+
+            # Plot selected rows
+            for row_index in self.selected_rows:
+                cell_value = self.df[coordinate_column].iloc[row_index]
+
+                # Check if cell_value is a numpy.int64
+                if isinstance(cell_value, np.int64):
+                    # Convert to string before splitting
+                    cell_value = str(cell_value)
+
+                if pd.isnull(cell_value) or cell_value == "":
+                    continue  # Skip iteration if the cell value is NaN or empty
+
+                try:
+                    coord_list = cell_value.split(';')  
+                    # Extract the first two values from each coordinate and convert them to integers
+                    x_coords = [int(coord.split(',')[0]) for coord in coord_list]
+                    y_coords = [int(coord.split(',')[1]) for coord in coord_list]
+
+                except (ValueError, IndexError):
+                    continue
+
+                # Check if any empty string is present in coord_list
+                if any(not coord for coord in coord_list):
+                    continue  # Skip iteration if an empty string is found
+
+                label = f"User {self.df['ACCOUNT_ID'].iloc[row_index]} - bot"
+
+                # Check if the label has already been plotted
+                if label in plotted_labels:
+                    continue  # Skip iteration if the label has already been plotted
+
+                self.plot_canvas.axes.plot(x_coords, y_coords, marker='o', linestyle='-', label=label)
+
+                # Add the label to the set of plotted labels
+                plotted_labels.add(label)
+
+            # Add legend and labels outside the loop
+            self.plot_canvas.axes.legend()
+            self.plot_canvas.axes.set_xlabel('X Coordinate')
+            self.plot_canvas.axes.set_ylabel('Y Coordinate')
+            self.plot_canvas.axes.set_title(f'Bot Trajectory')
+
+            # Draw the canvas
+            self.plot_canvas.draw()
+            self.plot_button.setEnabled(True)
+            self.save_plot_button.setEnabled(True)
+    
+    def save_plot(self):
+        file_name, _ = QFileDialog.getSaveFileName(self, "Save Plot", "", "PNG Files (*.png);;All Files (*)")
+
+        if file_name:
+            self.plot_canvas.figure.savefig(file_name)
+            self.info_label.setText(f'Plot saved to: {file_name}')
+
+        
+    def create_statistical_df(self):
+        if self.output_df is not None:
+            # Assuming 'ID', 'Avg_Speed_unix', 'Avg_Accelerate_unix', 'Session time' are columns in output_df
+            statistical_df = self.output_df.groupby('ACCOUNT_ID').agg(
+                Number_of_Sessions=pd.NamedAgg(column='ID', aggfunc='count'),
+                Average_Speed=pd.NamedAgg(column='Avg_Speed_unix', aggfunc='mean'),
+                Average_Accelerate=pd.NamedAgg(column='Avg_Accelerate_unix', aggfunc='mean'),
+                Total_Session_Time=pd.NamedAgg(column='Session time', aggfunc='mean')
+            ).reset_index()
+
+            statistical_df = statistical_df[statistical_df['Number_of_Sessions'] > 2]
+            statistical_df = statistical_df.sort_values(by='Number_of_Sessions', ascending=False)
+
+            # Display the statistical_df or update your UI as needed
+            print(statistical_df)
+
+            self.statistical_df = statistical_df  # Save the statistical_df in the class for later use
+            self.info_label.setText('Statistical DataFrame created.')
+
+        else:
+            self.info_label.setText('Please analyze coordinates first.')
+
+    def save_statistical_df(self):
+        if hasattr(self, 'statistical_df'):
+            # Save statistical_df to Excel
+            file_name, _ = QFileDialog.getSaveFileName(self, "Save Statistical DataFrame", "", "Excel Files (*.xlsx);;All Files (*)")
+
+            if file_name:
+                self.statistical_df.to_excel(file_name, index=False)
+                self.info_label.setText(f'Statistical DataFrame saved to: {file_name}')
+        else:
+            self.info_label.setText('Please create the Statistical DataFrame first.')
+
+            
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    ex = CoordinateAnalyzerApp()
+    sys.exit(app.exec_())
