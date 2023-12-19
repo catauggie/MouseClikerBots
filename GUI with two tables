@@ -11,6 +11,11 @@ import sys
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.manifold import TSNE
+from scipy.signal import savgol_filter
+from scipy.signal import savgol_filter, argrelextrema
+from scipy.interpolate import interp1d
+from scipy.integrate import cumtrapz
+from scipy.special import gamma
 
 class PlotCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
@@ -38,6 +43,7 @@ class CoordinateAnalyzerApp(QWidget):
         self.plot_button = QPushButton('Plot Selected Rows', self)
         self.plot_button_right = QPushButton('Plot t-SNE', self)
         self.save_plot_button = QPushButton('Save Plot', self)
+        self.save_button_final = QPushButton('Save Final', self)
         self.info_label = QLabel(self)
         self.progress_bar = QProgressBar(self)
         self.result_table = QTableWidget(self)
@@ -73,6 +79,7 @@ class CoordinateAnalyzerApp(QWidget):
         right_layout.addWidget(self.result_table_right)
         right_layout.addWidget(self.plot_canvas_right)
         right_layout.addWidget(self.plot_button_right)
+        right_layout.addWidget(self.save_button_final)
 
         main_layout.addLayout(layout)
         main_layout.addLayout(right_layout)
@@ -89,6 +96,8 @@ class CoordinateAnalyzerApp(QWidget):
         
         # Connect the new plot_tsne method to the plot_button_right
         self.plot_button_right.clicked.connect(self.plot_tsne)
+        
+        self.save_button_final.clicked.connect(self.create_and_save_final_df)
         
         # Set up the main window
         self.setGeometry(300, 300, 800, 600)
@@ -152,6 +161,44 @@ class CoordinateAnalyzerApp(QWidget):
             acceleration = (speeds[i] - speeds[i - 1]) / time_diff
             accelerations.append(acceleration)
         return accelerations
+    
+    def calculate_half_speeds(self, unix_timestamps, x_coords, y_coords, derivative_order):
+        half_speeds = []
+        for i in range(1, len(unix_timestamps)):
+            time_diff = (unix_timestamps[i] - unix_timestamps[i - 1]) / 1000.0  # Convert to seconds
+            distance = np.sqrt((x_coords[i] - x_coords[i - 1]) ** 2 + (y_coords[i] - y_coords[i - 1]) ** 2)
+            half_speed = distance / time_diff
+            half_speeds.append(half_speed)
+
+        if isinstance(derivative_order, float):
+            # Use Savitzky-Golay filter for fractional derivative order
+            half_speeds_smoothed = savgol_filter(half_speeds, window_length=5, polyorder=2, deriv=0, delta=1.0, mode='mirror')
+            return half_speeds_smoothed
+        else:
+            # Use regular derivative if order is not a float
+            half_speeds_smoothed = savgol_filter(half_speeds, window_length=5, polyorder=2, deriv=derivative_order, delta=1.0, mode='mirror')
+            return half_speeds_smoothed
+    
+    def calculate_fractional_derivative(self, signal, order):
+        n = len(signal)
+        t = np.arange(n)
+
+        # Find local extrema
+        extrema_indices = argrelextrema(np.array(signal), np.greater)[0]
+
+        # Interpolate between extrema
+        interpolator = interp1d(extrema_indices, signal[extrema_indices], kind='cubic', fill_value="extrapolate")
+        interpolated_signal = interpolator(t)
+
+        # Calculate fractional derivative using cumulative trapezoidal integration
+        frac_diff = np.zeros_like(signal)
+        for i in range(1, n):
+            frac_diff[i] = cumtrapz(interpolated_signal[:i+1], dx=1)[-1]
+
+        # Normalize by gamma function
+        gamma_value = gamma(order + 1)
+        frac_diff /= gamma_value
+        return frac_diff
 
     def process_unix_column(self, input_df, col_name):
         total_cells = len(input_df)
@@ -161,6 +208,8 @@ class CoordinateAnalyzerApp(QWidget):
         processed_df = input_df.copy()  # Create a new DataFrame to store processed values
         processed_df['Avg_Speed_unix'] = np.nan
         processed_df['Avg_Accelerate_unix'] = np.nan
+        processed_df['Avg_half_Speed_unix'] = np.nan
+        processed_df['Avg_half_Accelerate_unix'] = np.nan
 
         for index, cell_value in enumerate(processed_df[col_name]):
             if pd.isnull(cell_value) or not isinstance(cell_value, str):
@@ -189,13 +238,17 @@ class CoordinateAnalyzerApp(QWidget):
 
                 # Calculate speeds and accelerations
                 distances = self.calculate_distances(unix_timestamps, x_coords, y_coords)
-                speeds = self.calculate_speeds(unix_timestamps, x_coords, y_coords)
+                speeds = self.calculate_half_speeds(unix_timestamps, x_coords, y_coords, derivative_order=1)#self.calculate_speeds(unix_timestamps, x_coords, y_coords)
+                half_speeds = self.calculate_half_speeds(unix_timestamps, x_coords, y_coords, derivative_order=0.5)
                 accelerations = self.calculate_accelerations(unix_timestamps, speeds)
-
+                half_accelerations = self.calculate_fractional_derivative(speeds, 0.5)
+                
                 # Store calculated values in the new DataFrame
                 processed_df.at[index, 'Trajectory Length'] = np.nanmean(distances)
                 processed_df.at[index, 'Avg_Speed_unix'] = np.nanmean(speeds)
+                processed_df.at[index, 'Avg_half_Speed_unix'] = np.nanmean(half_speeds)
                 processed_df.at[index, 'Avg_Accelerate_unix'] = np.nanmean(accelerations)
+                processed_df.at[index, 'Avg_half_Accelerate_unix'] = np.nanmean(half_accelerations)
 
             except Exception as e:
                 print(f"Error processing cell {index} in column {col_name}: {e}")
@@ -603,7 +656,9 @@ class CoordinateAnalyzerApp(QWidget):
             statistical_df = self.output_df.groupby('ACCOUNT_ID').agg(
                 Number_of_Sessions=pd.NamedAgg(column='ID', aggfunc='count'),
                 Average_Speed=pd.NamedAgg(column='Avg_Speed_unix', aggfunc='mean'),
+                Average_half_Speed=pd.NamedAgg(column='Avg_half_Speed_unix', aggfunc='mean'),
                 Average_Accelerate=pd.NamedAgg(column='Avg_Accelerate_unix', aggfunc='mean'),
+                #Average_half_Accelerate=pd.NamedAgg(column='Avg_half_Accelerate_unix', aggfunc='mean'),
                 Total_Session_Time=pd.NamedAgg(column='Session time', aggfunc='mean')
             ).reset_index()
 
@@ -749,6 +804,44 @@ class CoordinateAnalyzerApp(QWidget):
         else:
             self.info_label.setText('Please create the Statistical DataFrame first.')
 
+    def create_and_save_final_df(self):
+        if not hasattr(self, 'statistical_df'):
+            self.info_label.setText('Please create the Statistical DataFrame first.')
+            return
+
+        # Make sure to convert numerical columns to numeric types first
+        df = self.statistical_df.copy()
+        df['Average_Speed'] = df['Average_Speed'].astype(str).str.replace(',', '.').apply(pd.to_numeric, errors='coerce')
+        df['Average_Accelerate'] = df['Average_Accelerate'].astype(str).str.replace(',', '.').apply(pd.to_numeric, errors='coerce')
+        df['Total_Session_Time'] = df['Total_Session_Time'].astype(str).str.replace(',', '.').apply(pd.to_numeric, errors='coerce')
+        df['Bot days ratio'] = df['Bot days ratio'].astype(str).str.replace(',', '.').apply(pd.to_numeric, errors='coerce')
+        df['Bot traj ratio'] = df['Bot traj ratio'].astype(str).str.replace(',', '.').apply(pd.to_numeric, errors='coerce')
+        df['Activity'] = df['Activity'].astype(str).str.replace(',', '.').apply(pd.to_numeric, errors='coerce')
+
+        # Group by 'Cluster' and calculate statistics
+        cluster_stats = df.groupby('Cluster').agg({
+            'Number_of_Sessions': ['mean', 'std', 'min', 'max'],
+            'Average_Speed': ['mean', 'std', 'min', 'max'],
+            'Average_Accelerate': ['mean', 'std', 'min', 'max'],
+            'Total_Session_Time': ['mean', 'std', 'min', 'max'],
+            'Bot days ratio': ['mean', 'std', 'min', 'max'],
+            'Bot traj ratio': ['mean', 'std', 'min', 'max'],
+            'Activity': ['mean', 'std', 'min', 'max']
+        }).reset_index()
+
+        # Transpose the resulting DataFrame
+        transposed_cluster_stats = cluster_stats.transpose()
+        transposed_cluster_stats.iloc[0] = list(df['Cluster'].value_counts())
+        transposed_cluster_stats.iloc[0] = transposed_cluster_stats.iloc[0].round()
+
+        self.final_df = transposed_cluster_stats
+
+        if hasattr(self, 'final_df'):
+            file_name, _ = QFileDialog.getSaveFileName(self, "Save Final DataFrame", "", "Excel Files (*.xlsx);;All Files (*)")
+
+            if file_name:
+                self.final_df.to_excel(file_name, index=True)
+                self.info_label.setText(f'Final DataFrame saved to: {file_name}')
             
 if __name__ == '__main__':
     app = QApplication(sys.argv)
